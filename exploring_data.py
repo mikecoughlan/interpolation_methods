@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[49]:
-
-
 import pandas as pd 
 import numpy as np 
 import matplotlib.pyplot as plt 
@@ -23,395 +17,547 @@ from tensorflow.keras.models import Sequential, load_model
 import tensorflow as tf
 
 
-# In[2]:
+def loading_solarwind_data():
+    '''
+    Loading in the ace data that Jose resampled. Then changes the index to 
+    the datetime and removes some unnecessary columns.
 
+    returns the loaded dataframe
+    '''
+    df = pd.read_feather('../../../jmarchezi/research-projects/solar-wind-data-with-gaps/outputData/combined_ace_data_resampled.feather')
 
-df = pd.read_feather('../../../jmarchezi/research-projects/solar-wind-data-with-gaps/outputData/combined_ace_data_resampled.feather')
+    pd.to_datetime(df['ACEepoch'], format='%Y-%m-%d %H:%M:%S')
+    df.set_index('ACEepoch', inplace=True, drop=True)
+    df.index = pd.to_datetime(df.index)
 
+    df.dropna(inplace=True)
+    df.drop(['YR', 'Month', 'Day', 'HR'], axis=1, inplace=True)
 
-# In[3]:
+    return df
 
 
-pd.to_datetime(df['ACEepoch'], format='%Y-%m-%d %H:%M:%S')
-df.set_index('ACEepoch', inplace=True, drop=True)
-df.index = pd.to_datetime(df.index)
+def getting_testing_data_for_one_param(df, param, continuious_length=1, test_size=0.2, random_state=42):
+    '''
+    Creates the mask for identifying which samples can be used for testing. Those samples must have 
+    continuious data before and after so that a linear interpolation can be performed for comparison. 
+    Also ensures that no more than the selected test size is segmented for the testing set, ensuring enough 
+    training data. Ensures that no consecutive samples are taken because of the linear interp.
 
-df.dropna(inplace=True)
-df.drop(['YR', 'Month', 'Day', 'HR'], axis=1, inplace=True)
+    Args:
+        df (pd.dataframe): solar wind dataframe
+        param (string): parameter that will be used as the target
+        continuious_length (int, optional): size of the gap. THis method may only be able to do 1 Defaults to 1.
+        test_size (float, optional): percentage of the whole dataframe to use for the test set. Defaults to 0.2.
+        random_state (int, optional): random state variable. Defaults to 42.
 
+    Returns:
+        samples_to_nan: index of the samples that will be used for testing
+        test_param: dataframe with the real data for storing the predicted values
+    '''
 
-# In[4]:
+    time_diff = df.index.to_series().diff()
+    mask = (time_diff.shift(-1) == pd.Timedelta(minutes=continuious_length)) & (time_diff == pd.Timedelta(minutes=continuious_length))
 
+    # Find consecutive True values in the mask
+    consecutive_true = mask.cumsum()
+    mask = mask & (consecutive_true % 2 == 1)
 
-time_diff = df.index.to_series().diff()
-mask = (time_diff.shift(-1) == pd.Timedelta(minutes=1)) & (time_diff == pd.Timedelta(minutes=1))
+    # Seeing if there are more samples than the testing size
+    num_true = mask.sum()
+    max_samples = int(len(df) * test_size)  # n% of the total number of rows
 
-print(mask.sum())
+    # If the number of True values exceeds the maximum samples, randomly sample from the True indices
+    if num_true > max_samples:
+        sample_indices = mask[mask].sample(n=max_samples, random_state=42).index
+        mask = mask.index.isin(sample_indices)
 
-# Find consecutive True values in the mask
-consecutive_true = mask.cumsum()
-mask = mask & (consecutive_true % 2 == 1)
+    # applying the mask
+    samples_to_nan = df[mask]
 
-print(mask.sum())
+    test_nans = df[param].copy()
+    test_nans.loc[test_nans.index.isin(samples_to_nan.index)] = np.nan
 
-num_true = mask.sum()
-max_samples = int(len(df) * 0.2)  # 20% of the total number of rows
+    # Check for consecutive rows with NaN values
+    consecutive_nan = test_nans.isnull() & test_nans.shift().isnull()
 
-# If the number of True values exceeds the maximum samples, randomly sample from the True indices
-if num_true > max_samples:
-    sample_indices = mask[mask].sample(n=max_samples, random_state=42).index
-    mask = mask.index.isin(sample_indices)
+    # Check if any consecutive NaN rows exist
+    if consecutive_nan.any():
+        print("Consecutive NaN rows exist.")
+    else:
+        print("No consecutive NaN rows.")
 
-samples_to_nan = df[mask]
+    # Doing the linear interpolation for comparison
+    linear_interp = test_nans.interpolate(method='linear')
 
+    # creating one df for the testing data and results
+    test_param = pd.DataFrame({'real':df[param].copy(),
+                            'nans':test_nans,
+                            'linear_interp':linear_interp})
 
-# In[5]:
 
+    return samples_to_nan, test_param
 
-test_vx_nans = df['Vx'].copy()
-test_vx_nans.loc[test_vx_nans.index.isin(samples_to_nan.index)] = np.nan
-print(df)
 
+def seperating_training_and_test(df, param, test_param, samples_to_nan):
+    '''
+    Seperating the training and testing data.
 
-# In[6]:
+    Args:
+        df (pd.dataframe): dataframe of all the solar wind data
+        param (string): solar wind parameter used as target
+        test_param (pd.dataframe): real target parameter data and datafarme for storing the model predictions
+        samples_to_nan (): indexs of testing data for segmenting from the larger df
 
+    Returns:
+        pd.dataframes and np.arrays: testing and trianing data
+    '''
 
-# Check for consecutive rows with NaN values
-consecutive_nan = test_vx_nans.isnull() & test_vx_nans.shift().isnull()
+    # cutting down this df to only the training samples
+    test_param = test_param.loc[test_param.index.isin(samples_to_nan.index)]
 
-# Check if any consecutive NaN rows exist
-if consecutive_nan.any():
-    print("Consecutive NaN rows exist.")
-else:
-    print("No consecutive NaN rows.")
+    # segmenting the training and testing df from the solar wind df using the indexes
+    training_data = df[~df.index.isin(samples_to_nan.index)]
+    testing_data = df[df.index.isin(samples_to_nan.index)]
 
+    # Seperating the inputs and targets
+    X_train = np.array(training_data.drop(param, axis=1).reset_index(drop=True, inplace=False))
+    y_train = np.array(training_data[param].reset_index(drop=True, inplace=False))
+    X_test = np.array(testing_data.drop(param, axis=1).reset_index(drop=True, inplace=False))
+    y_test = np.array(testing_data[param].reset_index(drop=True, inplace=False))
 
-# In[7]:
+    return test_param, training_data, testing_data, X_train, y_train, X_test, y_test
 
 
-linear_interp = test_vx_nans.interpolate(method='linear')
-test_vx = pd.DataFrame({'real':df['Vx'].copy(),
-						'nans':test_vx_nans,
-						'linear_interp':linear_interp})
+class interpolation_replacement_methods():
 
+    def __init__(self, test_param, X_train, y_train, X_test):
 
-# In[8]:
+        self.test_param = test_param
+        self.X_train = X_train
+        self.y_train = y_train
+        self.X_test = X_test
 
 
-test_vx = test_vx.loc[test_vx.index.isin(samples_to_nan.index)]
-test_vx
+    def linear_regression(self):
+        '''
+        Doing the linear regression on the dataset
 
+        Args:
+            test_param (pd.dataframe): dataframe for storing the model predictions
+            X_train (np.array): array of the model input training data
+            y_train (np.array): array of the model target training data
+            X_test (np.array): array of the model input testing data
 
-# In[9]:
+        Returns:
+            test_param (pd.dataframe): dataframe with new column for LR predictions
+        '''
+        # Fitting is linear regression
+        linear_reg = LinearRegression().fit(self.X_train, self.y_train)
 
+        # Predicting using the fit LR model
+        LR_test = linear_reg.predict(self.X_test)
 
-training_data = df[~df.index.isin(samples_to_nan.index)]
-testing_data = df[df.index.isin(samples_to_nan.index)]
+        # Storing it in the dataframe
+        self.test_param['linear_regression'] = LR_test
 
 
-# In[10]:
+    def k_nearest_neighbors(self):
+        '''
+        Doing the k nearest neighbors on the dataset
 
+        Args:
+            test_param (pd.dataframe): dataframe for storing the model predictions
+            X_train (np.array): array of the model input training data
+            y_train (np.array): array of the model target training data
+            X_test (np.array): array of the model input testing data
 
-X_train = np.array(training_data.drop('Vx', axis=1).reset_index(drop=True, inplace=False))
-y_train = np.array(training_data['Vx'].reset_index(drop=True, inplace=False))
-X_test = np.array(testing_data.drop('Vx', axis=1).reset_index(drop=True, inplace=False))
-y_test = np.array(testing_data['Vx'].reset_index(drop=True, inplace=False))
+        Returns:
+            test_param (pd.dataframe): dataframe with new column for KNN predictions
+        '''
+        # Initilizing the K-Nearest Neighbors.
+        knn = KNeighborsRegressor(n_neighbors=5, weights='distance')
 
+        # fitting
+        knn.fit(self.X_train, self.y_train)
 
-# In[11]:
+        # predicting
+        knn_test = knn.predict(self.X_test)
 
+        # adding results into the dataframe
+        self.test_param['knn'] = knn_test
 
-'''Model training and predicting section. These will be the SK learn based models such as linear regression, tree-based models, etc.'''
 
+    def knn_ensemble(self):
+        '''
+        Doing the knn_ensemble on the dataset. Ensemble is done using 5 
+        different k values and takes the mean.
 
-# In[12]:
+        Args:
+            test_param (pd.dataframe): dataframe for storing the model predictions
+            X_train (np.array): array of the model input training data
+            y_train (np.array): array of the model target training data
+            X_test (np.array): array of the model input testing data
 
+        Returns:
+            test_param (pd.dataframe): dataframe with new column for KNN Ensemble predictions
+        '''
+        # using 2 neighbors
+        knn2 = KNeighborsRegressor(n_neighbors=2, weights='distance')
+        knn2.fit(self.X_train, self.y_train)
+        knn2_test = knn2.predict(self.X_test)
 
-# First is linear regression
-linear_reg = LinearRegression().fit(X_train, y_train)
-LR_test = linear_reg.predict(X_test)
-test_vx['linear_regression'] = LR_test
+        # using 4 neighbors
+        knn4 = KNeighborsRegressor(n_neighbors=4, weights='distance')
+        knn4.fit(self.X_train, self.y_train)
+        knn4_test = knn4.predict(self.X_test)
 
+        # using 6 neighbors
+        knn6 = KNeighborsRegressor(n_neighbors=6, weights='distance')
+        knn6.fit(self.X_train, self.y_train)
+        knn6_test = knn6.predict(self.X_test)
 
-# In[13]:
+        # using 8 neighbors
+        knn8 = KNeighborsRegressor(n_neighbors=8, weights='distance')
+        knn8.fit(self.X_train, self.y_train)
+        knn8_test = knn8.predict(self.X_test)
 
+        # using 10 neighbors
+        knn10 = KNeighborsRegressor(n_neighbors=10, weights='distance')
+        knn10.fit(self.X_train, self.y_train)
+        knn10_test = knn10.predict(self.X_test)
 
-# Next is K-Nearest Neighbors. Here will do a single one and an ensamble
-knn = KNeighborsRegressor(n_neighbors=5, weights='distance')
-knn.fit(X_train, y_train)
-knn_test = knn.predict(X_test)
-test_vx['knn'] = knn_test
+        # taking the mean of the 5 models
+        knn_ensamble = np.mean([knn2_test, knn4_test, knn6_test, knn8_test, knn10_test], axis=0)
 
+        # saving to the dataframe
+        self.test_param['knn_ensamble'] = knn_ensamble
 
-# In[14]:
 
+    def decision_tree(self):
+        '''
+        Doing the decision tree on the dataset
 
-# the knn ensamble where we change the number of neighbors
-knn2 = KNeighborsRegressor(n_neighbors=2, weights='distance')
-knn2.fit(X_train, y_train)
-knn2_test = knn2.predict(X_test)
+        Args:
+            test_param (pd.dataframe): dataframe for storing the model predictions
+            X_train (np.array): array of the model input training data
+            y_train (np.array): array of the model target training data
+            X_test (np.array): array of the model input testing data
 
-knn4 = KNeighborsRegressor(n_neighbors=4, weights='distance')
-knn4.fit(X_train, y_train)
-knn4_test = knn4.predict(X_test)
+        Returns:
+            test_param (pd.dataframe): dataframe with new column for decision tree predictions
+        '''
+        
+        # establising the Decision Tree
+        tree = DecisionTreeRegressor(random_state=42)
 
-knn6 = KNeighborsRegressor(n_neighbors=6, weights='distance')
-knn6.fit(X_train, y_train)
-knn6_test = knn6.predict(X_test)
+        # fitting the tree
+        tree.fit(self.X_train, self.y_train)
 
-knn8 = KNeighborsRegressor(n_neighbors=8, weights='distance')
-knn8.fit(X_train, y_train)
-knn8_test = knn8.predict(X_test)
+        # doing the prediction
+        tree_test = tree.predict(self.X_test)
 
-knn10 = KNeighborsRegressor(n_neighbors=10, weights='distance')
-knn10.fit(X_train, y_train)
-knn10_test = knn10.predict(X_test)
+        # adding it to the dataframe
+        self.test_param['tree'] = tree_test
 
-knn_ensamble = np.mean([knn2_test, knn4_test, knn6_test, knn8_test, knn10_test], axis=0)
 
-test_vx['knn_ensamble'] = knn_ensamble
+    def decision_tree_ensemble(self):
+        '''
+        Doing a decision tree ensemble on the dataset using different 
+        random state initializers. Results are averaged for the final result.
 
+        Args:
+            test_param (pd.dataframe): dataframe for storing the model predictions
+            X_train (np.array): array of the model input training data
+            y_train (np.array): array of the model target training data
+            X_test (np.array): array of the model input testing data
 
-# In[15]:
+        Returns:
+            test_param (pd.dataframe): dataframe with new column for DT emsemble predictions
+        '''
 
+        # the decision tree ensamble where we change the random state
+        tree0 = DecisionTreeRegressor(random_state=1)
+        tree0.fit(self.X_train, self.y_train)
+        tree0_test = tree0.predict(self.X_test)
 
-# Next is Decision Tree. Here will do a single one and an ensamble
-tree = DecisionTreeRegressor(random_state=42)
-tree.fit(X_train, y_train)
-tree_test = tree.predict(X_test)
-test_vx['tree'] = tree_test
+        tree1 = DecisionTreeRegressor(random_state=10)
+        tree1.fit(self.X_train, self.y_train)
+        tree1_test = tree1.predict(self.X_test)
 
+        tree2 = DecisionTreeRegressor(random_state=100)
+        tree2.fit(self.X_train, self.y_train)
+        tree2_test = tree2.predict(self.X_test)
+
+        tree3 = DecisionTreeRegressor(random_state=1000)
+        tree3.fit(self.X_train, self.y_train)
+        tree3_test = tree3.predict(self.X_test)
+
+        tree4 = DecisionTreeRegressor(random_state=10000)
+        tree4.fit(self.X_train, self.y_train)
+        tree4_test = tree4.predict(self.X_test)
+
+        # taking the mean
+        tree_ensamble = np.mean([tree0_test, tree1_test, tree2_test, tree3_test, tree4_test], axis=0)
+
+        # adding to the dataframe
+        self.test_param['tree_ensamble'] = tree_ensamble
 
-# In[16]:
+
+    def random_forest(self):
+        '''
+        Doing a random forest on the dataset
+
+        Args:
+            test_param (pd.dataframe): dataframe for storing the model predictions
+            X_train (np.array): array of the model input training data
+            y_train (np.array): array of the model target training data
+            X_test (np.array): array of the model input testing data
+
+        Returns:
+            test_param (pd.dataframe): dataframe with new column for RF predictions
+        '''
+
+        # initilizing the random forest
+        forest = RandomForestRegressor(verbose=1, n_estimators=100, random_state=42, n_jobs=-1)
+
+        # fitting the random forest
+        forest.fit(self.X_train, self.y_train)
+
+        # predicting on the testing dataset
+        forest_test = forest.predict(self.X_test)
 
+        # adding to teh dataframe
+        self.test_param['forest'] = forest_test
 
-# the decision tree ensamble where we change the random state
-tree0 = DecisionTreeRegressor(random_state=1)
-tree0.fit(X_train, y_train)
-tree0_test = tree0.predict(X_test)
+    
+    def run(self):
+        
+        # Get all the functions in the class
+        functions = [getattr(self, func_name) for func_name in dir(self) if callable(getattr(self, func_name))]
+        
+        # Loop over the functions and call them with the input data
+        for func in functions:
+            func()
+
 
-tree1 = DecisionTreeRegressor(random_state=10)
-tree1.fit(X_train, y_train)
-tree1_test = tree1.predict(X_test)
 
-tree2 = DecisionTreeRegressor(random_state=100)
-tree2.fit(X_train, y_train)
-tree2_test = tree2.predict(X_test)
+class ANN():
+
+    def __init__(self, test_param, X_train, y_train, X_test):
+        '''
+        Initilizing parameters
+
+        Args:
+            test_param (pd.dataframe): dataframe for storing the model predictions
+            X_train (np.array): array of the model input training data
+            y_train (np.array): array of the model target training data
+            X_test (np.array): array of the model input testing data
+        '''
+
+        self.test_param = test_param
+        self.X_train = X_train
+        self.y_train = y_train
+        self.X_test = X_test
+
+
+    def data_prep(self):
+        '''
+        splitting the training and validation data then scaling it using a standard scaler.
+        '''
+        ann_xtrain, ann_xval, ann_ytrain, ann_yval = train_test_split(self.X_train, self.y_train, test_size=0.2, random_state=42)
+
+        scaler = StandardScaler()
+        scaler.fit(ann_xtrain)
+        self.ann_xtrain = scaler.transform(ann_xtrain)
+        self.ann_xval = scaler.transform(ann_xval)
+        self.ann_xtest = scaler.transform(X_test)
+
+
+    def model_building(self):
+        '''
+        Putting the model together. Includes an early stopping condition.
+        '''
+        self.model = Sequential()						# initalizing the model
+        self.model.add(Dense(100, activation='relu', input_shape=(ann_xtrain.shape[1],)))		# Adding dense layers with dropout in between
+        self.model.add(Dropout(0.2))
+        self.model.add(Dense(50, activation='relu'))
+        self.model.add(Dropout(0.2))
+        self.model.add(Dense(10, activation='relu'))
+        self.model.add(Dropout(0.2))
+        self.model.add(Dense(1))
+        opt = tf.keras.optimizers.Adam(learning_rate=1e-3)		# learning rate that actually started producing good results
+        self.model.compile(optimizer=opt, loss='mse')					# Ive read that cross entropy is good for this type of model
+        self.early_stop = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10)		# early stop process prevents overfitting
 
-tree3 = DecisionTreeRegressor(random_state=1000)
-tree3.fit(X_train, y_train)
-tree3_test = tree3.predict(X_test)
+    def fit_and_predict(self):
+        '''
+        fitting the model, making the prediction and saving it to the dataframe.
+        '''
+        self.model.fit(self.ann_xtrain, self.ann_ytrain, validation_data=(self.ann_xval, self.ann_yval),
+                            verbose=1, shuffle=True, epochs=500, callbacks=[self.early_stop], batch_size=1024)
 
-tree4 = DecisionTreeRegressor(random_state=10000)
-tree4.fit(X_train, y_train)
-tree4_test = tree4.predict(X_test)
+        ann_test = model.predict(self.ann_xtest)
 
-tree_ensamble = np.mean([tree0_test, tree1_test, tree2_test, tree3_test, tree4_test], axis=0)
+        self.test_param['ANN'] = ann_test
+
+    
+    def run(self):
+        
+        # Get all the functions in the class
+        functions = [getattr(self, func_name) for func_name in dir(self) if callable(getattr(self, func_name))]
+        
+        # Loop over the functions and call them with the input data
+        for func in functions:
+            func()
+
+
+def compiling_errors(test_param):
+    '''
+    calculating the prediction errors for each prediction method.
+
+    Args:
+        test_param (pd.dataframe): dataframe containing the real data and all of the predictions
+    '''
+
+    # creating a list to store the results. 
+    error_list = []
+
+    # storing the real data
+    y_true = test_param['real']
+
+    # Getting all the names of the method columns
+    methods = test_param.columns.pop(['real', 'nans'])
+
+    # looping through the columns, calculating the error and adding to the list
+    for method in methods:
+        error_list.append(np.sqrt(mean_squared_error(y_true, test_param[method])))
+    
+    return error_list, y_true, methods
+
+
+def plotting_errors(error_list):
+    '''
+    plots the errors for general comparison
+
+    Args:
+        error_list (list): root mean squared errors for each prediction method
+    '''
+
+    fig = plt.figure(figsize=(10,5))
+    x = [i for i in range(len(error_list))]
+    x_labels = ['Linear Interpolation', 'Linear Regression', 'KNN', 'KNN Ensemble', 'Decision Tree', 'DT Ensemble', 'Random Forest', 'ANN']
+    plt.scatter(x, error_list)
+    plt.xticks(x, x_labels)
+    plt.ylabel('RMSE')
+    plt.title('1 minute gaps in Vx')
+    plt.save('plots/interpolation_method_errors.png')
+    print(error_list)
+
+
+def calculating_difference(testing_data, test_param, y_true, comparison_param, methods):
+    '''
+    _summary_
 
-test_vx['tree_ensamble'] = tree_ensamble
+    Args:
+        testing_data (pd.dataframe): larger testing dataframe with all the input parameters included
+        test_param (pd.dataframe): testing target data with model predictions
+        y_true (pd.series): series of the real testing target data
+        comparison_param (str): parameter to compare the prediction difference to. Will for the x axis of the difference plots.
+        methods (list): list of columns, one for each of the interpolation methods. Form the column names of the test_param df
 
+    Returns:
+        error_df (pd.dataframe): differences between the real testing values and the model predictions
+    '''
 
-# In[17]:
+    # creating a new dataframe
+    error_df = pd.DataFrame()
 
+    # selecting the parameter for comparison with the differences
+    error_df['comparison_param'] = testing_data[comparison_param]
 
-test_vx
+    # looping over all the methods to calculate the difference and add it to the dataframe
+    for method in methods:
+        error_df[method] = y_true - test_param[method]
 
+    return error_df
 
-# In[31]:
 
+def plotting_differences(error_df, param):
 
-# Random Forest time. Here will do a single one and an ensamble
-forest = RandomForestRegressor(verbose=1, n_estimators=100, random_state=42, n_jobs=-1)
-forest.fit(X_train, y_train)
-forest_test = forest.predict(X_test)
-test_vx['forest'] = forest_test
+    fig = plt.figure(figsize=(20,15))
 
+    ax0 = plt.subplot(341)
+    plt.scatter(error_df['comparison_param'], error_df['linear_interp'], color='blue')
+    plt.title('Linear Interp.')
+    plt.axhline(0, linestyle='--')
+    plt.ylabel('Difference')
+    plt.xlabel(param)
 
-# In[70]:
+    ax1 = plt.subplot(342)
+    plt.scatter(error_df['comparison_param'], error_df['linear_regression'], color='orange')
+    plt.title('Linear Regression')
+    plt.axhline(0, linestyle='--')
+    plt.ylabel('Difference')
+    plt.xlabel(param)
 
+    ax2 = plt.subplot(343)
+    plt.scatter(error_df['comparison_param'], error_df['knn'], color='green')
+    plt.title('KNN')
+    plt.axhline(0, linestyle='--')
+    plt.ylabel('Difference')
+    plt.xlabel(param)
 
-ann_xtrain, ann_xval, ann_ytrain, ann_yval = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+    ax3 = plt.subplot(344)
+    plt.scatter(error_df['comparison_param'], error_df['knn_ensamble'], color='black')
+    plt.title('KNN Ensemble')
+    plt.axhline(0, linestyle='--')
+    plt.ylabel('Difference')
+    plt.xlabel(param)
 
-scaler = StandardScaler()
-scaler.fit(ann_xtrain)
-ann_xtrain = scaler.transform(ann_xtrain)
-ann_xval = scaler.transform(ann_xval)
-ann_xtest = scaler.transform(X_test)
+    ax4 = plt.subplot(345)
+    plt.scatter(error_df['comparison_param'], error_df['tree'], color='purple')
+    plt.title('Decision Tree')
+    plt.axhline(0, linestyle='--')
+    plt.ylabel('Difference')
+    plt.xlabel(param)
 
+    ax5 = plt.subplot(346)
+    plt.scatter(error_df['comparison_param'], error_df['tree_ensamble'], color='red')
+    plt.title('DT Ensemble')
+    plt.axhline(0, linestyle='--')
+    plt.ylabel('Difference')
+    plt.xlabel(param)
 
-# In[71]:
+    ax6 = plt.subplot(347)
+    plt.scatter(error_df['comparison_param'], error_df['forest'], color='brown')
+    plt.title('Random Forest')
+    plt.axhline(0, linestyle='--')
+    plt.ylabel('Difference')
+    plt.xlabel(param)
 
+    ax7 = plt.subplot(348)
+    plt.scatter(error_df['comparison_param'], error_df['ANN'], color='cyan')
+    plt.title('ANN')
+    plt.axhline(0, linestyle='--')
+    plt.ylabel('Difference')
+    plt.xlabel(param)
 
-model = Sequential()						# initalizing the model
+    plt.savefig(f'plots/{param}_vs_difference.png')
 
-model.add(Dense(100, activation='relu', input_shape=(ann_xtrain.shape[1],)))		# Adding dense layers with dropout in between
-model.add(Dropout(0.2))
-model.add(Dense(50, activation='relu'))
-model.add(Dropout(0.2))
-model.add(Dense(10, activation='relu'))
-model.add(Dropout(0.2))
-model.add(Dense(1))
-opt = tf.keras.optimizers.Adam(learning_rate=1e-3)		# learning rate that actually started producing good results
-model.compile(optimizer=opt, loss='mse')					# Ive read that cross entropy is good for this type of model
-early_stop = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10)		# early stop process prevents overfitting
 
-model.fit(ann_xtrain, ann_ytrain, validation_data=(ann_xval, ann_yval),
-					verbose=1, shuffle=True, epochs=500, callbacks=[early_stop], batch_size=1024)
+def main():
 
-ann_test = model.predict(ann_xtest)
+    param = 'Vx'
 
-test_vx['ANN'] = ann_test
+    df = loading_solarwind_data()
 
+    samples_to_nan, test_param = getting_testing_data_for_one_param(df, param)
 
-# In[19]:
+    test_param, training_data, testing_data, X_train, y_train, X_test, y_test = seperating_training_and_test(df, param, test_param, samples_to_nan)
 
 
-# # the random forest ensamble where we change the random state and the number of estimators
-# forest0 = RandomForestRegressor(verbose=1, n_estimators=10, random_state=1)
-# forest0.fit(X_train, y_train)
-# forest0_test = forest0.predict(X_test)
 
-# forest1 = RandomForestRegressor(verbose=1, n_estimators=50, random_state=10)
-# forest1.fit(X_train, y_train)
-# forest1_test = forest1.predict(X_test)
 
-# forest2 = RandomForestRegressor(verbose=1, n_estimators=100, random_state=100)
-# forest2.fit(X_train, y_train)
-# forest2_test = forest2.predict(X_test)
-
-# forest3 = RandomForestRegressor(verbose=1, n_estimators=500, random_state=1000)
-# forest3.fit(X_train, y_train)
-# forest3_test = forest3.predict(X_test)
-
-# forest4 = RandomForestRegressor(verbose=1, n_estimators=1000, random_state=10000)
-# forest4.fit(X_train, y_train)
-# forest4_test = forest4.predict(X_test)
-
-# forest_ensamble = np.mean([forest0_test, forest1_test, forest2_test, forest3_test, forest4_test], axis=0)
-
-# test_vx['forest_ensamble'] = forest_ensamble
-
-
-# In[65]:
-
-
-test_vx
-
-
-# In[62]:
-
-
-error_list = []
-y_true = test_vx['real']
-error_list.append(np.sqrt(mean_squared_error(y_true, test_vx['linear_interp'])))
-error_list.append(np.sqrt(mean_squared_error(y_true, test_vx['linear_regression'])))
-error_list.append(np.sqrt(mean_squared_error(y_true, test_vx['knn'])))
-error_list.append(np.sqrt(mean_squared_error(y_true, test_vx['knn_ensamble'])))
-error_list.append(np.sqrt(mean_squared_error(y_true, test_vx['tree'])))
-error_list.append(np.sqrt(mean_squared_error(y_true, test_vx['tree_ensamble'])))
-error_list.append(np.sqrt(mean_squared_error(y_true, test_vx['forest'])))
-error_list.append(np.sqrt(mean_squared_error(y_true, test_vx['ANN'])))
-
-
-# In[63]:
-
-
-fig = plt.figure(figsize=(10,5))
-x = [i for i in range(len(error_list))]
-x_labels = ['Linear Interpolation', 'Linear Regression', 'KNN', 'KNN Ensemble', 'Decision Tree', 'DT Ensemble', 'Random Forest', 'ANN']
-plt.scatter(x, error_list)
-plt.xticks(x, x_labels)
-plt.ylabel('RMSE')
-plt.title('1 minute gaps in Vx')
-plt.show()
-
-
-# In[64]:
-
-
-print(error_list)
-
-
-# In[42]:
-
-
-testing_data
-
-
-# In[45]:
-
-
-param = 'T'
-
-error_df = pd.DataFrame()
-error_df['real'] = testing_data[param]
-error_df['linear_interp'] = y_true - test_vx['linear_interp']
-error_df['linear_regression'] = y_true - test_vx['linear_regression']
-error_df['knn'] = y_true - test_vx['knn']
-error_df['knn_ensamble'] = y_true - test_vx['knn_ensamble']
-error_df['tree'] = y_true - test_vx['tree']
-error_df['tree_ensamble'] = y_true - test_vx['tree_ensamble']
-error_df['forest'] = y_true - test_vx['forest']
-
-
-# In[46]:
-
-
-fig = plt.figure(figsize=(20,15))
-
-ax0 = plt.subplot(341)
-plt.scatter(error_df['real'], error_df['linear_interp'], color='blue')
-plt.title('Linear Interp.')
-plt.axhline(0, linestyle='--')
-plt.ylabel('Difference')
-plt.xlabel(param)
-
-ax1 = plt.subplot(342)
-plt.scatter(error_df['real'], error_df['linear_regression'], color='orange')
-plt.title('Linear Regression')
-plt.axhline(0, linestyle='--')
-plt.ylabel('Difference')
-plt.xlabel(param)
-
-ax2 = plt.subplot(343)
-plt.scatter(error_df['real'], error_df['knn'], color='green')
-plt.title('KNN')
-plt.axhline(0, linestyle='--')
-plt.ylabel('Difference')
-plt.xlabel(param)
-
-ax3 = plt.subplot(344)
-plt.scatter(error_df['real'], error_df['knn_ensamble'], color='black')
-plt.title('KNN Ensemble')
-plt.axhline(0, linestyle='--')
-plt.ylabel('Difference')
-plt.xlabel(param)
-
-ax4 = plt.subplot(345)
-plt.scatter(error_df['real'], error_df['tree'], color='purple')
-plt.title('Decision Tree')
-plt.axhline(0, linestyle='--')
-plt.ylabel('Difference')
-plt.xlabel(param)
-
-ax5 = plt.subplot(346)
-plt.scatter(error_df['real'], error_df['tree_ensamble'], color='red')
-plt.title('DT Ensemble')
-plt.axhline(0, linestyle='--')
-plt.ylabel('Difference')
-plt.xlabel(param)
-
-ax6 = plt.subplot(347)
-plt.scatter(error_df['real'], error_df['forest'], color='brown')
-plt.title('Random Forest')
-plt.axhline(0, linestyle='--')
-plt.ylabel('Difference')
-plt.xlabel(param)
-
-plt.show()
-
-
-# In[ ]:
 
 
 
