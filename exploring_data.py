@@ -1,8 +1,8 @@
-import pandas as pd 
-import numpy as np 
-import matplotlib.pyplot as plt 
-import os 
-from datetime import datetime 
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from datetime import datetime
 
 from sklearn.linear_model import LinearRegression
 from sklearn.neighbors import KNeighborsRegressor
@@ -19,7 +19,7 @@ import tensorflow as tf
 
 def loading_solarwind_data():
     '''
-    Loading in the ace data that Jose resampled. Then changes the index to 
+    Loading in the ace data that Jose resampled. Then changes the index to
     the datetime and removes some unnecessary columns.
 
     returns the loaded dataframe
@@ -38,9 +38,9 @@ def loading_solarwind_data():
 
 def getting_testing_data_for_one_param(df, param, continuious_length=1, test_size=0.2, random_state=42):
     '''
-    Creates the mask for identifying which samples can be used for testing. Those samples must have 
-    continuious data before and after so that a linear interpolation can be performed for comparison. 
-    Also ensures that no more than the selected test size is segmented for the testing set, ensuring enough 
+    Creates the mask for identifying which samples can be used for testing. Those samples must have
+    continuious data before and after so that a linear interpolation can be performed for comparison.
+    Also ensures that no more than the selected test size is segmented for the testing set, ensuring enough
     training data. Ensures that no consecutive samples are taken because of the linear interp.
 
     Args:
@@ -189,7 +189,7 @@ class interpolation_replacement_methods():
 
     def knn_ensemble(self):
         '''
-        Doing the knn_ensemble on the dataset. Ensemble is done using 5 
+        Doing the knn_ensemble on the dataset. Ensemble is done using 5
         different k values and takes the mean.
 
         Args:
@@ -246,7 +246,7 @@ class interpolation_replacement_methods():
         Returns:
             test_param (pd.dataframe): dataframe with new column for decision tree predictions
         '''
-        
+
         # establising the Decision Tree
         tree = DecisionTreeRegressor(random_state=42)
 
@@ -262,7 +262,7 @@ class interpolation_replacement_methods():
 
     def decision_tree_ensemble(self):
         '''
-        Doing a decision tree ensemble on the dataset using different 
+        Doing a decision tree ensemble on the dataset using different
         random state initializers. Results are averaged for the final result.
 
         Args:
@@ -329,12 +329,12 @@ class interpolation_replacement_methods():
         # adding to teh dataframe
         self.test_param['forest'] = forest_test
 
-    
+
     def run(self):
-        
+
         # Get all the functions in the class
         functions = [getattr(self, func_name) for func_name in dir(self) if callable(getattr(self, func_name))]
-        
+
         # Loop over the functions and call them with the input data
         for func in functions:
             func()
@@ -400,12 +400,12 @@ class ANN():
 
         self.test_param['ANN'] = ann_test
 
-    
+
     def run(self):
-        
+
         # Get all the functions in the class
         functions = [getattr(self, func_name) for func_name in dir(self) if callable(getattr(self, func_name))]
-        
+
         # Loop over the functions and call them with the input data
         for func in functions:
             func()
@@ -419,7 +419,7 @@ def compiling_errors(test_param):
         test_param (pd.dataframe): dataframe containing the real data and all of the predictions
     '''
 
-    # creating a list to store the results. 
+    # creating a list to store the results.
     error_list = []
 
     # storing the real data
@@ -431,7 +431,7 @@ def compiling_errors(test_param):
     # looping through the columns, calculating the error and adding to the list
     for method in methods:
         error_list.append(np.sqrt(mean_squared_error(y_true, test_param[method])))
-    
+
     return error_list, y_true, methods
 
 
@@ -451,12 +451,13 @@ def plotting_errors(error_list):
     plt.ylabel('RMSE')
     plt.title('1 minute gaps in Vx')
     plt.save('plots/interpolation_method_errors.png')
+    print('Interpolation methods RMSE:')
     print(error_list)
 
 
 def calculating_difference(testing_data, test_param, y_true, comparison_param, methods):
     '''
-    _summary_
+    calculates the differences between teh different interpolation methods and the real data
 
     Args:
         testing_data (pd.dataframe): larger testing dataframe with all the input parameters included
@@ -554,6 +555,26 @@ def main():
     samples_to_nan, test_param = getting_testing_data_for_one_param(df, param)
 
     test_param, training_data, testing_data, X_train, y_train, X_test, y_test = seperating_training_and_test(df, param, test_param, samples_to_nan)
+
+    interp_methods = interpolation_replacement_methods(test_param, X_train, y_train, X_test)
+    interp_methods.run()
+
+    ann_method = ANN(test_param, X_train, y_train, X_test)
+    ann_method.run()
+
+    error_list, y_true, methods = compiling_errors(test_param)
+
+    plotting_errors(error_list)
+
+    error_df = calculating_difference(testing_data, test_param, y_true, comparison_param='BZ_GSM', methods=methods)
+
+    plotting_differences(error_df, param)
+
+
+if __name__ == '__main__':
+    main()
+
+
 
 
 
