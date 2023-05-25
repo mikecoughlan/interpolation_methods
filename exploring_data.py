@@ -556,11 +556,9 @@ def main():
 
     test_param, training_data, testing_data, X_train, y_train, X_test, y_test = seperating_training_and_test(df, param, test_param, samples_to_nan)
 
-    interp_methods = interpolation_replacement_methods(test_param, X_train, y_train, X_test)
-    interp_methods.run()
+    interpolation_replacement_methods(test_param, X_train, y_train, X_test).run()
 
-    ann_method = ANN(test_param, X_train, y_train, X_test)
-    ann_method.run()
+    ANN(test_param, X_train, y_train, X_test).run()
 
     error_list, y_true, methods = compiling_errors(test_param)
 
