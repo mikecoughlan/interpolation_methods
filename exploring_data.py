@@ -1,20 +1,21 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+import inspect
 import os
 from datetime import datetime
 
-from sklearn.linear_model import LinearRegression
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.tree import DecisionTreeRegressor
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import tensorflow as tf
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeRegressor
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.layers import Dense, Dropout, Conv1D
+from tensorflow.keras.layers import Conv1D, Dense, Dropout
 from tensorflow.keras.models import Sequential, load_model
-import tensorflow as tf
 
 
 def loading_solarwind_data():
@@ -332,13 +333,18 @@ class interpolation_replacement_methods():
 
     def run(self):
 
-        # Get all the functions in the class
-        functions = [getattr(self, func_name) for func_name in dir(self) if callable(getattr(self, func_name))]
-
-        # Loop over the functions and call them with the input data
-        for func in functions:
-            func()
-
+        print('Linear Regression')
+        self.linear_regression()
+        print('KNN')
+        self.k_nearest_neighbors()
+        print('KNN Ensemble')
+        self.knn_ensemble()
+        print('Decision Tree')
+        self.decision_tree()
+        print('DT Ensemble')
+        self.decision_tree_ensemble()
+        print('Random Forest')
+        self.random_forest()
 
 
 class ANN():
@@ -403,12 +409,9 @@ class ANN():
 
     def run(self):
 
-        # Get all the functions in the class
-        functions = [getattr(self, func_name) for func_name in dir(self) if callable(getattr(self, func_name))]
-
-        # Loop over the functions and call them with the input data
-        for func in functions:
-            func()
+        self.data_prep()
+        self.model_building()
+        self.fit_and_predict()
 
 
 def compiling_errors(test_param):
@@ -557,6 +560,8 @@ def main():
     test_param, training_data, testing_data, X_train, y_train, X_test, y_test = seperating_training_and_test(df, param, test_param, samples_to_nan)
 
     interpolation_replacement_methods(test_param, X_train, y_train, X_test).run()
+
+    print(test_param)
 
     ANN(test_param, X_train, y_train, X_test).run()
 
